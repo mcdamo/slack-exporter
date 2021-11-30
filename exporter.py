@@ -46,7 +46,7 @@ def get_remote(url):
 
 
 
-def get_with_auth(url, params=[], cursor=None, response_url=None):
+def get_with_auth(url, params=[], response_url=None):
     """
     Get slack url with authentication
 
