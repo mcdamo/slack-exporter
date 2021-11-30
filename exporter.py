@@ -29,13 +29,31 @@ def handle_print(text, response_url=None):
         post_response(response_url, text)
 
 
-# pagination handling
+def get_remote(url):
+    """
+    Get a remote url (external to Slack)
+
+    Returns the response object on success
+
+    Raises RuntimeError on failure
+    """
+    r = requests.get(url)
+
+    if r.status_code != 200:
+        raise RuntimeError("ERROR: %s %s" % (r.status_code, r.reason))
+
+    return r
 
 
-def get_at_cursor(url, params, cursor=None, response_url=None):
-    if cursor is not None:
-        params["cursor"] = cursor
 
+def get_with_auth(url, params=[], cursor=None, response_url=None):
+    """
+    Get slack url with authentication
+
+    Returns the response object on success
+
+    Raises RuntimeError on failure
+    """
     # slack api (OAuth 2.0) now requires auth tokens in HTTP Authorization header
     # instead of passing it as a query parameter
     try:
@@ -47,7 +65,23 @@ def get_at_cursor(url, params, cursor=None, response_url=None):
     r = requests.get(url, headers=headers, params=params)
 
     if r.status_code != 200:
-        handle_print("ERROR: %s %s" % (r.status_code, r.reason), response_url)
+        raise RuntimeError("ERROR: %s %s" % (r.status_code, r.reason))
+
+    return r
+
+
+
+# pagination handling
+
+
+def get_at_cursor(url, params, cursor=None, response_url=None):
+    if cursor is not None:
+        params["cursor"] = cursor
+
+    try:
+        r = get_with_auth(url, params, cursor, response_url)
+    except RuntimeError as e:
+        handle_print(e, response_url)
         sys.exit(1)
 
     d = r.json()
@@ -357,6 +391,9 @@ if __name__ == "__main__":
         "--to", help="Unix timestamp for latest message"
     )
     parser.add_argument(
+        "--dl", action="store_true", help="Download uploaded files"
+    )
+    parser.add_argument(
         "-r",
         action="store_true",
         help="Get reply threads for all accessible conversations",
@@ -383,6 +420,17 @@ if __name__ == "__main__":
                 else:
                     f.write(data)
 
+    def save_file(data, subdir, filename):
+        out_dir_parent = os.path.abspath(
+            os.path.expanduser(os.path.expandvars(a.o))
+        )
+        out_dir = os.path.join(out_dir_parent, "slack_export_%s" % ts, subdir)
+        os.makedirs(out_dir, exist_ok=True)
+        full_filepath = os.path.join(out_dir, filename)
+        print("Writing file to %s" % full_filepath)
+        with open(full_filepath, mode="wb") as f:
+            f.write(data)
+
     def save_replies(channel_hist, channel_id, users):
         ch_replies = channel_replies(
             [x["ts"] for x in channel_hist if "reply_count" in x], channel_id
@@ -400,6 +448,37 @@ if __name__ == "__main__":
             sep = "=" * 24
             data_replies = "%s\n%s\n\n%s" % (header_str, sep, data_replies)
         save(data_replies, "channel-replies_%s" % channel_id)
+
+    def download_file(fileobject, ch_id):
+        """
+        Download and save file represented in fileobject
+
+        Print error and continue on failures
+        """
+        datestr = datetime.fromtimestamp(fileobject['timestamp']).strftime('%Y-%m-%d_%H%M%S')
+        ext = fileobject['filetype']
+        mime = fileobject['mimetype']
+        url = fileobject['url_private']
+        filename = "{ts}.{ext}".format(ts=datestr, ext=ext)
+        print("Downloading %s" % url)
+        try:
+            if not fileobject['is_external']:
+                response = get_with_auth(url)
+            else:
+                response = get_remote(url)
+            contentType = str(response.headers['content-type'])
+            if contentType != mime:
+                handle_print("ERROR: Mime mismatch, expected {}, received {}".format(mime, contentType))
+            else:
+                save_file(response.content, "channel_%s" % ch_id, filename)
+        except RuntimeError as e:
+            handle_print(e)
+
+    def download_files(channel_hist, channel_id):
+        for message in channel_hist:
+            if 'files' in message:
+                for fo in message["files"]:
+                    download_file(fo, channel_id)
 
     def save_channel(ch_id, ch_list, users):
         ts_fr = a.fr
@@ -420,6 +499,12 @@ if __name__ == "__main__":
         save(data_ch, "channel_%s" % ch_id)
         if a.r:
             save_replies(ch_hist, ch_id, users)
+        if a.dl:
+            download_files(ch_hist, ch_id)
+
+    if a.dl and not a.o:
+        print("Output directory argument required to download files")
+        sys.exit(1)
 
     if a.lc:
         data = (
